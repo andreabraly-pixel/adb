@@ -6,11 +6,11 @@ Schedule : Mon–Fri 08:00 CST
            Monday pulls Sat + Sun + Mon-minus-1  (3 days back)
            Tue–Fri pulls the previous calendar day only
 
-Channels : 6 feed-* channels  →  messages assigned to @Andrea Braly
-           feed-website-visitors  →  assigned to Andrea; contacts live in threads
-           feed-outbound-signals  →  ALL posts, no filter
+Channels : 6 feed-* channels  →  messages assigned to each rep
+           feed-website-visitors  →  assigned to rep; contacts live in threads
+           feed-outbound-signals  →  ALL posts, sent to all reps
 
-Output   : CSV + summary DM'd to Andrea (D09BU8CPF34)
+Output   : Per-rep CSV DM'd to each rep. Andrea is @mentioned in her summary.
 
 Required env var:
     SLACK_BOT_TOKEN   – bot token with the scopes listed in README
@@ -32,9 +32,13 @@ from slack_sdk.errors import SlackApiError
 # ── Config ────────────────────────────────────────────────────────────────────
 
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-ANDREA_USER_ID  = "U09BU8CHL2W"
-DM_CHANNEL_ID   = "D09BU8CPF34"
 CST             = ZoneInfo("America/Chicago")
+
+REPS = [
+    {"name": "Andrea Braly",    "id": "U09BU8CHL2W", "mention": True},
+    {"name": "Daniel Mendez",   "id": "U0A0E2971HV", "mention": False},
+    {"name": "Melissa Houston", "id": "U094BN3GBCG", "mention": False},
+]
 
 CHANNELS = [
     {"id": "C0ACUBVBNAZ", "name": "feed-hiring-alerts",               "filter": "andrea", "threads": False},
@@ -229,12 +233,12 @@ def extract_fields(text: str) -> dict:
 
 # ── Assignment filter ─────────────────────────────────────────────────────────
 
-def is_assigned_to_andrea(client: WebClient, channel_id: str, msg: dict) -> bool:
+def is_assigned_to(client: WebClient, channel_id: str, msg: dict, user_id: str) -> bool:
     """
-    A lead is "assigned to Andrea" when her user ID (<@U09BU8CHL2W>) appears
+    A lead is assigned to a rep when their Slack user ID appears
     in the message itself OR in any thread reply under that message.
     """
-    mention = f"<@{ANDREA_USER_ID}>"
+    mention = f"<@{user_id}>"
     if mention in full_text(msg):
         return True
     if (msg.get("reply_count") or 0) > 0:
@@ -268,7 +272,7 @@ def is_empty(lead: dict) -> bool:
 
 # ── Per-channel logic ─────────────────────────────────────────────────────────
 
-def process_channel(client: WebClient, ch: dict, oldest: float, latest: float):
+def process_channel(client: WebClient, ch: dict, oldest: float, latest: float, user_id: str):
     messages = fetch_history(client, ch["id"], oldest, latest)
     source   = ch["name"]
     leads = []
@@ -277,7 +281,7 @@ def process_channel(client: WebClient, ch: dict, oldest: float, latest: float):
         if msg.get("subtype"):          # skip app joins, message_changed, etc.
             continue
 
-        if ch["filter"] == "andrea" and not is_assigned_to_andrea(client, ch["id"], msg):
+        if ch["filter"] == "andrea" and not is_assigned_to(client, ch["id"], msg, user_id):
             continue
 
         if ch["threads"]:
@@ -321,7 +325,7 @@ def classify_seniority(title: str) -> str:
     return "individual"
 
 
-def build_summary(leads, oldest: float, latest: float) -> str:
+def build_summary(leads, oldest: float, latest: float, rep: dict) -> str:
     fmt = "%b %-d"
     start = datetime.fromtimestamp(oldest, tz=CST).strftime(fmt)
     end   = datetime.fromtimestamp(latest - 1, tz=CST).strftime(fmt)
@@ -342,8 +346,11 @@ def build_summary(leads, oldest: float, latest: float) -> str:
         if tier in by_seniority
     )
 
+    # @mention the rep in their own summary if configured
+    greeting = f"<@{rep['id']}> " if rep.get("mention") else ""
+
     return (
-        f":wave: Good morning, Andrea! Here are your leads for {date_range}.\n\n"
+        f":wave: {greeting}Good morning, {rep['name'].split()[0]}! Here are your leads for {date_range}.\n\n"
         f"*{len(leads)} total leads*\n\n"
         f"*By source:*\n{src_lines}\n\n"
         f"*By seniority:*\n{sen_lines}"
@@ -363,35 +370,34 @@ def main() -> None:
     args           = parse_args()
     client         = WebClient(token=SLACK_BOT_TOKEN)
     oldest, latest = get_date_range(args.start, args.end)
+    now_str        = datetime.now(CST).strftime("%Y-%m-%d")
 
-    all_leads = []
-    for ch in CHANNELS:
-        print(f"Processing #{ch['name']} …", file=sys.stderr)
-        leads = process_channel(client, ch, oldest, latest)
-        print(f"  → {len(leads)} lead(s)", file=sys.stderr)
-        all_leads.extend(leads)
+    for rep in REPS:
+        print(f"\n── {rep['name']} ──", file=sys.stderr)
+        rep_leads = []
+        for ch in CHANNELS:
+            print(f"  Processing #{ch['name']} …", file=sys.stderr)
+            leads = process_channel(client, ch, oldest, latest, rep["id"])
+            print(f"    → {len(leads)} lead(s)", file=sys.stderr)
+            rep_leads.extend(leads)
 
-    now_str  = datetime.now(CST).strftime("%Y-%m-%d")
-    filename = f"andrea_leads_{now_str}.csv"
-    summary  = build_summary(all_leads, oldest, latest)
-    csv_text = build_csv(all_leads)
+        first = rep["name"].split()[0].lower()
+        filename = f"{first}_leads_{now_str}.csv"
+        summary  = build_summary(rep_leads, oldest, latest, rep)
+        csv_text = build_csv(rep_leads)
 
-    # Open DM with Andrea (creates it if it doesn't exist)
-    dm = client.conversations_open(users=[ANDREA_USER_ID])
-    dm_id = dm["channel"]["id"]
+        # Open DM (creates it if it doesn't exist)
+        dm    = client.conversations_open(users=[rep["id"]])
+        dm_id = dm["channel"]["id"]
 
-    # 1. Post the summary text
-    client.chat_postMessage(channel=dm_id, text=summary)
-
-    # 2. Upload the CSV
-    client.files_upload_v2(
-        channel=dm_id,
-        content=csv_text,
-        filename=filename,
-        title=f"Leads {now_str}",
-    )
-
-    print(f"Done — {len(all_leads)} lead(s) written to {filename}", file=sys.stderr)
+        client.chat_postMessage(channel=dm_id, text=summary)
+        client.files_upload_v2(
+            channel=dm_id,
+            content=csv_text,
+            filename=filename,
+            title=f"Leads {now_str}",
+        )
+        print(f"  Sent {len(rep_leads)} lead(s) → {filename}", file=sys.stderr)
 
 
 if __name__ == "__main__":
