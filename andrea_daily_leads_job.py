@@ -36,8 +36,8 @@ CST             = ZoneInfo("America/Chicago")
 
 REPS = [
     {"name": "Andrea Braly",    "id": "U09BU8CHL2W", "mention": True},
-    {"name": "Daniel Mendez",   "id": "U0A0E2971HV", "mention": False},
-    {"name": "Melissa Houston", "id": "U094BN3GBCG", "mention": False},
+    {"name": "Daniel Mendez",   "id": "U0A0E2971HV", "mention": True},
+    {"name": "Melissa Houston", "id": "U094BN3GBCG", "mention": True},
 ]
 
 CHANNELS = [
