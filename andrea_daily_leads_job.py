@@ -19,6 +19,7 @@ Required env var:
 import argparse
 import csv
 import io
+import json
 import os
 import re
 import sys
@@ -366,20 +367,51 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def write_input_json(args, oldest: float, latest: float) -> None:
+    data = {
+        "run_at":     datetime.now(CST).isoformat(),
+        "start_date": args.start or datetime.fromtimestamp(oldest, tz=CST).strftime("%Y-%m-%d"),
+        "end_date":   args.end   or datetime.fromtimestamp(latest - 1, tz=CST).strftime("%Y-%m-%d"),
+        "reps":       [r["name"] for r in REPS],
+        "channels":   [ch["name"] for ch in CHANNELS],
+    }
+    with open("input.json", "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def write_output_json(results: list, oldest: float, latest: float) -> None:
+    data = {
+        "run_at":      datetime.now(CST).isoformat(),
+        "date_range": {
+            "start": datetime.fromtimestamp(oldest, tz=CST).strftime("%Y-%m-%d"),
+            "end":   datetime.fromtimestamp(latest - 1, tz=CST).strftime("%Y-%m-%d"),
+        },
+        "total_leads": sum(r["lead_count"] for r in results),
+        "by_rep": results,
+    }
+    with open("output.json", "w") as f:
+        json.dump(data, f, indent=2)
+
+
 def main() -> None:
     args           = parse_args()
     client         = WebClient(token=SLACK_BOT_TOKEN)
     oldest, latest = get_date_range(args.start, args.end)
     now_str        = datetime.now(CST).strftime("%Y-%m-%d")
 
+    write_input_json(args, oldest, latest)
+
+    results = []
     for rep in REPS:
         print(f"\n── {rep['name']} ──", file=sys.stderr)
         rep_leads = []
+        by_channel = {}
         for ch in CHANNELS:
             print(f"  Processing #{ch['name']} …", file=sys.stderr)
             leads = process_channel(client, ch, oldest, latest, rep["id"])
             print(f"    → {len(leads)} lead(s)", file=sys.stderr)
             rep_leads.extend(leads)
+            by_channel[ch["name"]] = len(leads)
 
         first = rep["name"].split()[0].lower()
         filename = f"{first}_leads_{now_str}.csv"
@@ -398,6 +430,9 @@ def main() -> None:
             title=f"Leads {now_str}",
         )
         print(f"  Sent {len(rep_leads)} lead(s) → {filename}", file=sys.stderr)
+        results.append({"rep": rep["name"], "lead_count": len(rep_leads), "by_channel": by_channel})
+
+    write_output_json(results, oldest, latest)
 
 
 if __name__ == "__main__":
