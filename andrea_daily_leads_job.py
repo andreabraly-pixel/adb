@@ -54,6 +54,9 @@ REPS = [
     {"name": "Melissa Houston", "id": "U094BN3GBCG", "mention": True},
 ]
 
+# Shared channel where summaries + CSVs are posted (avoids DM restrictions)
+TEAM_CHANNEL_ID = "C09K7UDJE1G"  # #-team-sdr
+
 CHANNELS = [
     {"id": "C0ACUBVBNAZ", "name": "feed-hiring-alerts",               "filter": "rep", "threads": False},
     {"id": "C0AC2QKCZMJ", "name": "feed-job-postings",                "filter": "rep", "threads": False},
@@ -446,11 +449,9 @@ def main() -> None:
 
         # ── Phase 2: write (show plan, then execute unless --dry-run) ─────────
         prior_ids = prior_output.get(rep["name"], {})
-        dm        = client.conversations_open(users=[rep["id"]])
-        dm_id     = dm["channel"]["id"]
 
         print(f"  Mutations for {rep['name']}:", file=sys.stderr)
-        slack_ids = deliver(client, dm_id, summary, csv_text, filename, prior_ids, args.dry_run)
+        slack_ids = deliver(client, TEAM_CHANNEL_ID, summary, csv_text, filename, prior_ids, args.dry_run)
 
         result = {
             "rep":        rep["name"],
