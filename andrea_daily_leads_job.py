@@ -548,6 +548,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--start",   metavar="YYYY-MM-DD", help="Inclusive start date")
     p.add_argument("--end",     metavar="YYYY-MM-DD", help="Inclusive end date")
     p.add_argument("--dry-run", action="store_true",  help="Preview mutations without sending to Slack")
+    p.add_argument("--channel", metavar="CHANNEL_ID", help="Post to a shared channel instead of DMs")
     return p.parse_args()
 
 
@@ -584,20 +585,24 @@ def main() -> None:
         # ── Phase 2: write (show plan, then execute unless --dry-run) ─────────
         prior_ids = prior_output.get(rep["name"], {})
 
-        # Open DM with rep — works from bot side without user needing to message first.
-        # If this fails the workspace admin needs to allow the bot to DM all users at:
-        # admin.slack.com → Installed Apps → [bot] → Permissions → Allow DMs
-        try:
-            dm    = client.conversations_open(users=[rep["id"]])
-            dm_id = dm["channel"]["id"]
-        except SlackApiError as e:
-            print(f"  [ERROR] Cannot open DM with {rep['name']}: {e.response['error']}", file=sys.stderr)
-            print(f"  [ERROR] Fix: admin.slack.com → Installed Apps → your bot → Permissions → Allow DMs to all users", file=sys.stderr)
-            results.append({"rep": rep["name"], "lead_count": len(rep_leads), "by_channel": by_channel, "slack_ids": {}, "error": e.response["error"]})
-            continue
+        if args.channel:
+            # Post to a shared channel (e.g. #-team-sdr)
+            target_id = args.channel
+        else:
+            # Open DM with rep — works from bot side without user needing to message first.
+            # If this fails the workspace admin needs to allow the bot to DM all users at:
+            # admin.slack.com → Installed Apps → [bot] → Permissions → Allow DMs
+            try:
+                dm    = client.conversations_open(users=[rep["id"]])
+                target_id = dm["channel"]["id"]
+            except SlackApiError as e:
+                print(f"  [ERROR] Cannot open DM with {rep['name']}: {e.response['error']}", file=sys.stderr)
+                print(f"  [ERROR] Fix: admin.slack.com → Installed Apps → your bot → Permissions → Allow DMs to all users", file=sys.stderr)
+                results.append({"rep": rep["name"], "lead_count": len(rep_leads), "by_channel": by_channel, "slack_ids": {}, "error": e.response["error"]})
+                continue
 
         print(f"  Mutations for {rep['name']}:", file=sys.stderr)
-        slack_ids = deliver(client, dm_id, summary, csv_text, filename, prior_ids, args.dry_run)
+        slack_ids = deliver(client, target_id, summary, csv_text, filename, prior_ids, args.dry_run)
 
         result = {
             "rep":        rep["name"],
