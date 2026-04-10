@@ -166,40 +166,179 @@ def full_text(msg: dict) -> str:
     return (msg.get("text") or "") + "\n" + blocks_to_text(msg.get("blocks") or [])
 
 
-def extract_name(msg: dict) -> str:
-    for block in (msg.get("blocks") or []):
-        if isinstance(block, dict) and block.get("type") == "header":
-            t = (block.get("text") or {}).get("text", "").strip()
-            if t and len(t.split()) <= 5 and "@" not in t and "http" not in t:
-                return t
-    text = full_text(msg)
-    m = re.search(r"\*([A-Z][a-z]+(?:\s[A-Z][a-z]+){1,2})\*", text)
+def _link_display(slack_link: str) -> str:
+    """Extract the display text from a Slack <url|display> token, or return raw."""
+    m = re.match(r"<[^|>]+\|([^>]+)>", slack_link.strip())
+    return m.group(1).strip() if m else slack_link.strip()
+
+
+def _link_url(slack_link: str) -> str:
+    """Extract the URL from a Slack <url|display> or <url> token."""
+    m = re.match(r"<([^|>]+)(?:\|[^>]*)?>", slack_link.strip())
+    return m.group(1).strip() if m else slack_link.strip()
+
+
+def _field_value(text: str, label: str) -> str:
+    """
+    Return the value after a labelled field line.
+    Handles both:
+      - Name: <url|Display>   →  Display text
+      - Name: plain text
+    Strips surrounding Slack bold markers (*...*), leading dashes, and blockquote (>).
+    """
+    # match "- Label: value" or "> *Label*: value" or "*Label*: value"
+    pattern = r"(?im)^[>\s\-]*\*?" + re.escape(label) + r"\*?:\s*(.+)$"
+    m = re.search(pattern, text)
+    if not m:
+        return ""
+    raw = m.group(1).strip().rstrip("*")
+    # If the value looks like a Slack link token, extract the display text
+    if raw.startswith("<"):
+        return _link_display(raw)
+    return raw
+
+
+def _linkedin_url(text: str) -> str:
+    """Extract a LinkedIn profile URL from any <url|...> or bare URL in the text."""
+    # Prefer Slack link tokens that contain linkedin.com/in/
+    m = re.search(r"<(https?://(?:www\.)?linkedin\.com/in/[^|>]+)(?:\|[^>]*)?>", text)
     if m:
         return m.group(1)
-    m = re.search(r"(?i)(?:name|contact)[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)", text)
+    # Bare URL fallback
+    m = re.search(r"https?://(?:www\.)?linkedin\.com/in/[\w%-]+", text)
+    return m.group(0) if m else ""
+
+
+def _email(text: str) -> str:
+    """Extract email address from <mailto:addr|addr> or bare address."""
+    m = re.search(r"<mailto:([^|>]+)(?:\|[^>]*)?>", text)
     if m:
         return m.group(1)
-    return ""
+    m = re.search(r"[\w.+%-]+@[\w-]+\.[a-zA-Z]{2,}", text)
+    return m.group(0) if m else ""
 
 
-FIELD_PATTERNS = {
-    "Title":     r"(?i)(?:title|role|position)[:\s]+([^\n|•*]+)",
-    "Company":   r"(?i)(?:company|org(?:anization)?|employer)[:\s]+([^\n|•*]+)",
-    "Industry":  r"(?i)industry[:\s]+([^\n|•*]+)",
-    "Employees": r"(?i)(?:employees?|headcount|team\s+size|size)[:\s]+([^\n|•*]+)",
-    "Email":     r"[\w.+%-]+@[\w-]+\.[a-zA-Z]{2,}",
-    "Phone":     r"(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}",
-    "LinkedIn":  r"(?:https?://)?(?:www\.)?linkedin\.com/in/[\w%-]+",
-}
+def _phone(text: str) -> str:
+    """Extract phone number from <tel:+1...|display> or bare number."""
+    m = re.search(r"<tel:[^|>]+\|([^>]+)>", text)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r"(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}", text)
+    return m.group(0) if m else ""
 
 
-def extract_fields(text: str) -> dict:
+# ── Channel-specific parsers ──────────────────────────────────────────────────
+
+def parse_hiring_alert(text: str) -> dict:
+    """
+    Parses messages from feed-hiring-alerts, feed-job-postings,
+    feed-funding-alerts, feed-mergers-acquisitions-alerts, feed-ipo-alerts.
+
+    Expected format:
+        *NEW HIRE: Full Name joined as Title*
+        *Person Details*
+        - Name: <linkedin_url|Full Name>
+        - Title: Finance Director
+        *Company: <url|Company Name>*
+        - Industry: government administration
+        - Size: 220 employees
+        *Contact Information*
+        - Email: <mailto:addr|addr>
+        - Phone: <tel:+1...|+1 (617) 281-3368>
+        :dart: *Assigned to:* <@USER_ID|Name>
+    """
     result = {}
-    for field, pattern in FIELD_PATTERNS.items():
-        m = re.search(pattern, text)
+
+    # Name — from "- Name: <url|Full Name>" line
+    name_raw = _field_value(text, "Name")
+    if not name_raw:
+        # fallback: headline "joined as" pattern
+        m = re.search(r"(?:^|\n)\*[^:*\n]+:\s+([A-Z][a-z]+(?: [A-Z][a-z]+)+) joined", text)
         if m:
-            result[field] = (m.group(1) if m.lastindex else m.group(0)).strip().rstrip(",;|•*")
+            name_raw = m.group(1)
+    if name_raw:
+        parts = name_raw.split(" ", 1)
+        result["First Name"] = parts[0]
+        result["Last Name"]  = parts[1] if len(parts) > 1 else ""
+
+    result["Title"]     = _field_value(text, "Title")
+    result["Industry"]  = _field_value(text, "Industry")
+    result["Email"]     = _email(text)
+    result["Phone"]     = _phone(text)
+    result["LinkedIn"]  = _linkedin_url(text)
+
+    # Company — from "*Company: <url|Name>*" line
+    company_raw = _field_value(text, "Company")
+    if not company_raw:
+        # also try "Organization:" label used in some variants
+        company_raw = _field_value(text, "Organization")
+    result["Company"] = company_raw
+
+    # Employees — from "- Size: 220 employees" or "- Employees: ..."
+    size_val = _field_value(text, "Size")
+    if not size_val:
+        size_val = _field_value(text, "Employees")
+    result["Employees"] = size_val
+
     return result
+
+
+def parse_outbound_signal(text: str) -> dict:
+    """
+    Parses messages from feed-outbound-signals (Common Room bot).
+
+    Expected format (blockquote lines):
+        > *Contact*: <url|Full Name>
+        > *Role*: Co-Founder/CEO
+        > *Email*: <mailto:addr|addr>
+        > *LinkedIn*: <url|linkedin.com/in/handle>
+        > *Organization*: <url|Company Name>
+        > *Industry*: SaaS
+        > *Employees*: 12
+    """
+    result = {}
+
+    name_raw = _field_value(text, "Contact")
+    if name_raw:
+        parts = name_raw.split(" ", 1)
+        result["First Name"] = parts[0]
+        result["Last Name"]  = parts[1] if len(parts) > 1 else ""
+
+    result["Title"]     = _field_value(text, "Role")
+    result["Company"]   = _field_value(text, "Organization")
+    result["Industry"]  = _field_value(text, "Industry")
+    result["Employees"] = _field_value(text, "Employees")
+    result["Email"]     = _email(text)
+    result["Phone"]     = _phone(text)
+    result["LinkedIn"]  = _linkedin_url(text)
+
+    return result
+
+
+def parse_website_visitor(text: str) -> dict:
+    """
+    Parses reply messages from feed-website-visitors threads.
+    Format tends to match the hiring-alert style; fall back to outbound if needed.
+    """
+    result = parse_hiring_alert(text)
+    # If we got nothing, try outbound format
+    if not result.get("First Name") and not result.get("Email"):
+        result = parse_outbound_signal(text)
+    return result
+
+
+# Channel name → parser
+_OUTBOUND_CHANNEL  = "feed-outbound-signals"
+_VISITOR_CHANNEL   = "feed-website-visitors"
+
+
+def extract_lead_fields(text: str, channel_name: str) -> dict:
+    """Route to the correct parser based on channel."""
+    if channel_name == _OUTBOUND_CHANNEL:
+        return parse_outbound_signal(text)
+    if channel_name == _VISITOR_CHANNEL:
+        return parse_website_visitor(text)
+    return parse_hiring_alert(text)
 
 
 # ── Assignment filter ─────────────────────────────────────────────────────────
@@ -221,12 +360,9 @@ def build_lead(msg: dict, source: str, extra_text: str = "") -> dict:
     lead = {h: "" for h in HEADERS}
     lead["Source"] = source
     lead["Date"]   = ts_to_date(msg["ts"])
-    name = extract_name(msg)
-    if name:
-        parts = name.split(" ", 1)
-        lead["First Name"] = parts[0]
-        lead["Last Name"]  = parts[1] if len(parts) > 1 else ""
-    lead.update(extract_fields(full_text(msg) + ("\n" + extra_text if extra_text else "")))
+    combined = full_text(msg) + ("\n" + extra_text if extra_text else "")
+    fields = extract_lead_fields(combined, source)
+    lead.update({k: v for k, v in fields.items() if v})
     return lead
 
 
@@ -246,12 +382,13 @@ def process_channel(client: WebClient, ch: dict, oldest: float, latest: float, u
             continue
         if ch["threads"]:
             parent_text = full_text(msg)
-            company_m   = re.search(r"(?i)(?:company|org(?:anization)?)[:\s]+([^\n|•*]+)", parent_text)
-            company     = company_m.group(1).strip() if company_m else ""
+            # Extract company from parent message using the channel's parser
+            parent_fields = extract_lead_fields(parent_text, ch["name"])
+            parent_company = parent_fields.get("Company", "")
             for reply in fetch_replies(client, ch["id"], msg["ts"]):
                 lead = build_lead(reply, ch["name"], extra_text=parent_text)
-                if not lead["Company"] and company:
-                    lead["Company"] = company
+                if not lead["Company"] and parent_company:
+                    lead["Company"] = parent_company
                 if not is_empty(lead):
                     leads.append(lead)
         else:
