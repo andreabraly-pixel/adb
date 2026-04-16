@@ -10,8 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: claude/add-user-authentication-7XjCP
 
       - uses: actions/setup-python@v5
         with:
@@ -21,6 +19,6 @@ jobs:
         run: pip install slack-sdk
 
       - name: Run daily leads job
-        run: python andrea_daily_leads_job.py
+        run: python andrea_daily_leads_job.py --channel C09K7UDJE1G
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
