@@ -24,8 +24,9 @@ Flags
 --dry-run      Print what would be sent/updated per rep without touching Slack.
 --start / --end Override the automatic date range (YYYY-MM-DD).
 
-Required env var:
-    SLACK_BOT_TOKEN   – bot token with the scopes listed in README
+Required env vars:
+    SLACK_BOT_TOKEN    – bot token with the scopes listed in README
+    ANTHROPIC_API_KEY  – (optional) enables AI-generated outreach hooks per lead
 """
 
 import argparse
@@ -39,14 +40,17 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
+import anthropic
+
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-CST             = ZoneInfo("America/Chicago")
-OUTPUT_FILE     = "output.json"
+SLACK_BOT_TOKEN   = os.environ["SLACK_BOT_TOKEN"]
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  # optional
+CST               = ZoneInfo("America/Chicago")
+OUTPUT_FILE       = "output.json"
 
 REPS = [
     {"name": "Andrea Braly",    "id": "U09BU8CHL2W", "mention": True},
@@ -66,7 +70,7 @@ CHANNELS = [
 
 HEADERS = [
     "First Name", "Last Name", "Title", "Company", "Industry",
-    "Employees",  "Email",     "Phone", "LinkedIn", "Source", "Date",
+    "Employees",  "Email",     "Phone", "LinkedIn", "Source", "Date", "Hook",
 ]
 
 SENIORITY_TIERS = [
@@ -398,6 +402,74 @@ def process_channel(client: WebClient, ch: dict, oldest: float, latest: float, u
     return leads
 
 
+# ── AI hook generation ────────────────────────────────────────────────────────
+
+_HOOK_SYSTEM = (
+    "You are an expert SDR copywriter. Given a sales trigger alert and a lead's details, "
+    "write a single 1-2 sentence LinkedIn message opener or cold email first line. "
+    "Reference the specific trigger (funding round, new hire, acquisition, etc.) naturally. "
+    "Be conversational and human — not salesy. Do NOT mention any product or company name. "
+    "Output only the opener text, nothing else."
+)
+
+_TRIGGER_LABELS = {
+    "feed-hiring-alerts":               "new hire",
+    "feed-job-postings":                "job posting",
+    "feed-funding-alerts":              "funding round",
+    "feed-mergers-acquisitions-alerts": "acquisition",
+    "feed-ipo-alerts":                  "IPO",
+    "feed-website-visitors":            "website visit",
+    "feed-outbound-signals":            "buying signal",
+}
+
+
+def generate_hooks(leads) -> None:
+    """
+    Populate lead["Hook"] in-place for all leads that have enough data.
+    Uses a single Anthropic client with prompt caching on the system prompt.
+    Silently skips if ANTHROPIC_API_KEY is not set.
+    """
+    if not ANTHROPIC_API_KEY:
+        return
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    for lead in leads:
+        first   = lead.get("First Name", "")
+        last    = lead.get("Last Name", "")
+        title   = lead.get("Title", "")
+        company = lead.get("Company", "")
+        source  = lead.get("Source", "")
+
+        if not (first or company):
+            continue
+
+        trigger = _TRIGGER_LABELS.get(source, "signal")
+        name_str = f"{first} {last}".strip()
+        user_msg = (
+            f"Trigger type: {trigger}\n"
+            f"Lead: {name_str}, {title} at {company}\n"
+            f"Write the opener."
+        )
+
+        try:
+            resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=120,
+                system=[
+                    {
+                        "type": "text",
+                        "text": _HOOK_SYSTEM,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            lead["Hook"] = resp.content[0].text.strip()
+        except Exception as e:
+            print(f"  [WARN] Hook generation failed for {name_str}: {e}", file=sys.stderr)
+
+
 # ── CSV / summary builders ────────────────────────────────────────────────────
 
 def build_csv(leads) -> str:
@@ -433,12 +505,28 @@ def build_summary(leads, oldest: float, latest: float, rep: dict) -> str:
     sen_lines = "\n".join(
         f"  • {tier}: {by_seniority[tier]}" for tier in tier_order if tier in by_seniority
     )
+    # Top hooks — senior leads that have a generated hook
+    tier_rank = {t: i for i, (t, _) in enumerate(SENIORITY_TIERS)}
+    hooked = [l for l in leads if l.get("Hook") and l.get("First Name")]
+    hooked.sort(key=lambda l: tier_rank.get(classify_seniority(l.get("Title", "")), 99))
+    top_hooks = hooked[:3]
+    hooks_section = ""
+    if top_hooks:
+        hook_lines = []
+        for l in top_hooks:
+            name = f"{l.get('First Name','')} {l.get('Last Name','')}".strip()
+            co   = l.get("Company", "")
+            hook = l.get("Hook", "")
+            hook_lines.append(f"  *{name}* ({co})\n  _{hook}_")
+        hooks_section = "\n\n*:writing_hand: Top outreach hooks:*\n" + "\n\n".join(hook_lines)
+
     greeting = f"<@{rep['id']}> " if rep.get("mention") else ""
     return (
         f":wave: {greeting}Good morning, {rep['name'].split()[0]}! Here are your leads for {date_range}.\n\n"
         f"*{len(leads)} total leads*\n\n"
         f"*By source:*\n{src_lines}\n\n"
         f"*By seniority:*\n{sen_lines}"
+        f"{hooks_section}"
     )
 
 
@@ -576,6 +664,11 @@ def main() -> None:
             print(f"    → {len(leads)} lead(s)", file=sys.stderr)
             rep_leads.extend(leads)
             by_channel[ch["name"]] = len(leads)
+
+        # Generate AI hooks (no-op if ANTHROPIC_API_KEY not set)
+        if ANTHROPIC_API_KEY:
+            print(f"  Generating outreach hooks …", file=sys.stderr)
+        generate_hooks(rep_leads)
 
         first    = rep["name"].split()[0].lower()
         filename = f"{first}_leads_{now_str}.csv"

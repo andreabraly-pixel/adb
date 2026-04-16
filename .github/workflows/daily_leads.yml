@@ -16,9 +16,10 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install slack-sdk
+        run: pip install slack-sdk anthropic
 
       - name: Run daily leads job
         run: python andrea_daily_leads_job.py --channel C09K7UDJE1G
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
