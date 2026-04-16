@@ -40,7 +40,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
-import anthropic
+import anthropic as _anthropic_mod
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -430,9 +430,11 @@ def generate_hooks(leads) -> None:
     Silently skips if ANTHROPIC_API_KEY is not set.
     """
     if not ANTHROPIC_API_KEY:
+        print("  [hooks] ANTHROPIC_API_KEY not set — skipping hook generation", file=sys.stderr)
         return
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = _anthropic_mod.Anthropic(api_key=ANTHROPIC_API_KEY)
+    succeeded, failed = 0, 0
 
     for lead in leads:
         first   = lead.get("First Name", "")
@@ -466,8 +468,12 @@ def generate_hooks(leads) -> None:
                 messages=[{"role": "user", "content": user_msg}],
             )
             lead["Hook"] = resp.content[0].text.strip()
+            succeeded += 1
         except Exception as e:
+            failed += 1
             print(f"  [WARN] Hook generation failed for {name_str}: {e}", file=sys.stderr)
+
+    print(f"  [hooks] {succeeded} generated, {failed} failed", file=sys.stderr)
 
 
 # ── CSV / summary builders ────────────────────────────────────────────────────
@@ -655,56 +661,48 @@ def main() -> None:
     results = []
     for rep in REPS:
         print(f"\n── {rep['name']} ──", file=sys.stderr)
+        try:
+            # ── Phase 1: read (always runs) ───────────────────────────────────
+            rep_leads, by_channel = [], {}
+            for ch in CHANNELS:
+                print(f"  Processing #{ch['name']} …", file=sys.stderr)
+                leads = process_channel(client, ch, oldest, latest, rep["id"])
+                print(f"    → {len(leads)} lead(s)", file=sys.stderr)
+                rep_leads.extend(leads)
+                by_channel[ch["name"]] = len(leads)
 
-        # ── Phase 1: read (always runs) ───────────────────────────────────────
-        rep_leads, by_channel = [], {}
-        for ch in CHANNELS:
-            print(f"  Processing #{ch['name']} …", file=sys.stderr)
-            leads = process_channel(client, ch, oldest, latest, rep["id"])
-            print(f"    → {len(leads)} lead(s)", file=sys.stderr)
-            rep_leads.extend(leads)
-            by_channel[ch["name"]] = len(leads)
+            # Generate AI hooks (no-op if ANTHROPIC_API_KEY not set)
+            generate_hooks(rep_leads)
 
-        # Generate AI hooks (no-op if ANTHROPIC_API_KEY not set)
-        if ANTHROPIC_API_KEY:
-            print(f"  Generating outreach hooks …", file=sys.stderr)
-        generate_hooks(rep_leads)
+            first    = rep["name"].split()[0].lower()
+            filename = f"{first}_leads_{now_str}.csv"
+            summary  = build_summary(rep_leads, oldest, latest, rep)
+            csv_text = build_csv(rep_leads)
 
-        first    = rep["name"].split()[0].lower()
-        filename = f"{first}_leads_{now_str}.csv"
-        summary  = build_summary(rep_leads, oldest, latest, rep)
-        csv_text = build_csv(rep_leads)
+            # ── Phase 2: write (show plan, then execute unless --dry-run) ─────
+            prior_ids = prior_output.get(rep["name"], {})
 
-        # ── Phase 2: write (show plan, then execute unless --dry-run) ─────────
-        prior_ids = prior_output.get(rep["name"], {})
-
-        if args.channel:
-            # Post to a shared channel (e.g. #-team-sdr)
-            target_id = args.channel
-        else:
-            # Open DM with rep — works from bot side without user needing to message first.
-            # If this fails the workspace admin needs to allow the bot to DM all users at:
-            # admin.slack.com → Installed Apps → [bot] → Permissions → Allow DMs
-            try:
-                dm    = client.conversations_open(users=[rep["id"]])
+            if args.channel:
+                target_id = args.channel
+            else:
+                dm        = client.conversations_open(users=[rep["id"]])
                 target_id = dm["channel"]["id"]
-            except SlackApiError as e:
-                print(f"  [ERROR] Cannot open DM with {rep['name']}: {e.response['error']}", file=sys.stderr)
-                print(f"  [ERROR] Fix: admin.slack.com → Installed Apps → your bot → Permissions → Allow DMs to all users", file=sys.stderr)
-                results.append({"rep": rep["name"], "lead_count": len(rep_leads), "by_channel": by_channel, "slack_ids": {}, "error": e.response["error"]})
-                continue
 
-        print(f"  Mutations for {rep['name']}:", file=sys.stderr)
-        slack_ids = deliver(client, target_id, summary, csv_text, filename, prior_ids, args.dry_run)
+            print(f"  Mutations for {rep['name']}:", file=sys.stderr)
+            slack_ids = deliver(client, target_id, summary, csv_text, filename, prior_ids, args.dry_run)
 
-        result = {
-            "rep":        rep["name"],
-            "lead_count": len(rep_leads),
-            "by_channel": by_channel,
-            "slack_ids":  slack_ids,
-        }
-        results.append(result)
-        print(f"  {'[dry-run] ' if args.dry_run else ''}Done — {len(rep_leads)} lead(s)", file=sys.stderr)
+            result = {
+                "rep":        rep["name"],
+                "lead_count": len(rep_leads),
+                "by_channel": by_channel,
+                "slack_ids":  slack_ids,
+            }
+            results.append(result)
+            print(f"  {'[dry-run] ' if args.dry_run else ''}Done — {len(rep_leads)} lead(s)", file=sys.stderr)
+
+        except Exception as e:
+            print(f"  [ERROR] Failed to process {rep['name']}: {e}", file=sys.stderr)
+            results.append({"rep": rep["name"], "lead_count": 0, "by_channel": {}, "slack_ids": {}, "error": str(e)})
 
     write_output_json(results, oldest, latest)
 
