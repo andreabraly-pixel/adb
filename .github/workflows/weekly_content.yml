@@ -1,0 +1,25 @@
+name: Weekly LinkedIn Content
+
+on:
+  schedule:
+    - cron: "0 12 * * 5"   # 06:00 CST (UTC-6) = 12:00 UTC on Fridays
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install slack-sdk anthropic
+
+      - name: Generate weekly content ideas
+        run: python weekly_content_job.py
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
