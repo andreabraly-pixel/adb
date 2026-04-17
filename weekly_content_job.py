@@ -115,7 +115,7 @@ No agenda, no slides. Just people talking about real issues. How to become more 
 
 # ── Date helpers ──────────────────────────────────────────────────────────────
 
-def get_week_range(start: Optional[str] = None, end: Optional[str] = None):
+def get_date_range(start: Optional[str] = None, end: Optional[str] = None):
     if start:
         oldest = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=CST)
         latest = (
@@ -125,11 +125,9 @@ def get_week_range(start: Optional[str] = None, end: Optional[str] = None):
             if end else datetime.now(CST)
         )
         return oldest.timestamp(), latest.timestamp()
-    today  = datetime.now(CST).replace(hour=23, minute=59, second=59, microsecond=0)
-    monday = (today - timedelta(days=today.weekday())).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    return monday.timestamp(), today.timestamp()
+    today     = datetime.now(CST).replace(hour=0, minute=0, second=0, microsecond=0)
+    days_back = 3 if today.weekday() == 0 else 1  # Monday pulls Fri+Sat+Sun
+    return (today - timedelta(days=days_back)).timestamp(), today.timestamp()
 
 
 # ── Slack helpers ─────────────────────────────────────────────────────────────
@@ -326,7 +324,7 @@ def parse_args():
 def main():
     args           = parse_args()
     client         = WebClient(token=SLACK_BOT_TOKEN)
-    oldest, latest = get_week_range(args.start, args.end)
+    oldest, latest = get_date_range(args.start, args.end)
 
     start_str  = datetime.fromtimestamp(oldest, tz=CST).strftime("%b %-d")
     end_str    = datetime.fromtimestamp(latest, tz=CST).strftime("%b %-d")

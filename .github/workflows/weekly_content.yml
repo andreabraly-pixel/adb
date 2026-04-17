@@ -1,8 +1,8 @@
-name: Weekly LinkedIn Content
+name: Daily LinkedIn Content
 
 on:
   schedule:
-    - cron: "0 12 * * 5"   # 06:00 CST (UTC-6) = 12:00 UTC on Fridays
+    - cron: "0 12 * * 1-5"   # 06:00 CST (UTC-6) = 12:00 UTC Mon–Fri
   workflow_dispatch:
 
 jobs:
