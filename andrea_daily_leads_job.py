@@ -639,10 +639,11 @@ def write_output_json(results: list, oldest: float, latest: float) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Andrea daily leads job")
-    p.add_argument("--start",   metavar="YYYY-MM-DD", help="Inclusive start date")
-    p.add_argument("--end",     metavar="YYYY-MM-DD", help="Inclusive end date")
-    p.add_argument("--dry-run", action="store_true",  help="Preview mutations without sending to Slack")
-    p.add_argument("--channel", metavar="CHANNEL_ID", help="Post to a shared channel instead of DMs")
+    p.add_argument("--start",     metavar="YYYY-MM-DD", help="Inclusive start date")
+    p.add_argument("--end",       metavar="YYYY-MM-DD", help="Inclusive end date")
+    p.add_argument("--dry-run",   action="store_true",  help="Preview mutations without sending to Slack")
+    p.add_argument("--channel",   metavar="CHANNEL_ID", help="Post to a shared channel instead of DMs")
+    p.add_argument("--no-hooks",  action="store_true",  help="Skip AI hook generation")
     return p.parse_args()
 
 
@@ -671,8 +672,9 @@ def main() -> None:
                 rep_leads.extend(leads)
                 by_channel[ch["name"]] = len(leads)
 
-            # Generate AI hooks (no-op if ANTHROPIC_API_KEY not set)
-            generate_hooks(rep_leads)
+            # Generate AI hooks (skipped with --no-hooks or if ANTHROPIC_API_KEY not set)
+            if not args.no_hooks:
+                generate_hooks(rep_leads)
 
             first    = rep["name"].split()[0].lower()
             filename = f"{first}_leads_{now_str}.csv"
